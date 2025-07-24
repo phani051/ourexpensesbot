@@ -1,4 +1,6 @@
 # bot.py
+from dotenv import load_dotenv
+import os
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram.ext import (
     ApplicationBuilder,
@@ -27,7 +29,7 @@ from commands import (
 )
 from scheduler import auto_export_last_month
 
-
+load_dotenv()  # Load from .env in local development
 # Register command handlers
 def register_handlers(app):
     app.add_handler(CommandHandler("startgroup", startgroup))
