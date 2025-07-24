@@ -16,7 +16,7 @@ def init_db():
     conn = sqlite3.connect("expenses.db")
     cursor = conn.cursor()
 
-    # Expenses table
+    # Create tables if not exist
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS expenses (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -29,7 +29,6 @@ def init_db():
     )
     """)
 
-    # Income table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS income (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,7 +40,14 @@ def init_db():
     )
     """)
 
-    # Groups table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS budgets (
+        category TEXT,
+        limit_amount REAL,
+        group_id INTEGER
+    )
+    """)
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS groups (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,7 +55,6 @@ def init_db():
     )
     """)
 
-    # Users table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -58,40 +63,32 @@ def init_db():
     )
     """)
 
-    # Budgets table (with UNIQUE constraint)
+    # Migration: add missing columns
+    def add_column_if_missing(table, column, definition):
+        try:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition};")
+        except sqlite3.OperationalError:
+            pass
+
+    add_column_if_missing("expenses", "group_id", "INTEGER DEFAULT 1")
+    add_column_if_missing("income", "group_id", "INTEGER DEFAULT 1")
+    add_column_if_missing("budgets", "group_id", "INTEGER DEFAULT 1")
+
+    # Migration: ensure UNIQUE constraint on budgets
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS budgets (
-        category TEXT,
-        limit_amount REAL,
-        group_id INTEGER,
-        UNIQUE(category, group_id)
-    )
-    """)
-
-    # Ensure unique constraint exists
-    cursor.execute("PRAGMA index_list(budgets)")
-    indexes = cursor.fetchall()
-    has_unique = any(idx[2] == 1 for idx in indexes)
-
-    if not has_unique:
-        cursor.execute("SELECT category, limit_amount, group_id FROM budgets")
-        old_data = cursor.fetchall()
-
-        cursor.execute("DROP TABLE budgets")
-        cursor.execute("""
-        CREATE TABLE budgets (
+        CREATE TABLE IF NOT EXISTS budgets_new (
             category TEXT,
             limit_amount REAL,
             group_id INTEGER,
             UNIQUE(category, group_id)
         )
-        """)
-
-        if old_data:
-            cursor.executemany(
-                "INSERT OR IGNORE INTO budgets (category, limit_amount, group_id) VALUES (?, ?, ?)",
-                old_data
-            )
+    """)
+    cursor.execute("""
+        INSERT OR IGNORE INTO budgets_new (category, limit_amount, group_id)
+        SELECT category, limit_amount, group_id FROM budgets
+    """)
+    cursor.execute("DROP TABLE budgets")
+    cursor.execute("ALTER TABLE budgets_new RENAME TO budgets")
 
     conn.commit()
     conn.close()
@@ -106,7 +103,6 @@ def get_user_group_id(user_id):
     return result[0] if result else None
 
 def require_group(func):
-    """Decorator to ensure user has joined a group."""
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         group_id = get_user_group_id(update.effective_user.id)
         if not group_id:
@@ -126,12 +122,9 @@ async def set_bot_commands(app):
         BotCommand("startgroup", "Create or join a group"),
         BotCommand("mygroup", "Show your current group"),
         BotCommand("add", "Add expense"),
+        BotCommand("setbudget", "Set category budget"),
         BotCommand("list", "List current month expenses"),
         BotCommand("categories", "Show categories & budgets"),
-        BotCommand("setbudget", "Set budget for category"),
-        BotCommand("switchgroup", "Admin: switch group"),
-        BotCommand("listusers", "Admin: list users in current group"),
-        BotCommand("listgroups", "Admin: list all groups"),
         BotCommand("reset", "Reset group data"),
         BotCommand("help", "Show help")
     ]
@@ -144,7 +137,7 @@ async def startgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     existing_group_id = get_user_group_id(user_id)
     if existing_group_id and user_id != ADMIN_ID:
         await update.message.reply_text(
-            "You already belong to a group. Cannot join another group."
+            "You already belong to a group. You cannot join or create another group."
         )
         return
 
@@ -271,35 +264,7 @@ async def listgroups(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(message)
 
-# ===================== BUDGET COMMAND =====================
-@require_group
-async def set_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 2:
-        await update.message.reply_text("Usage: /setbudget <category> <amount>")
-        return
-
-    category = context.args[0]
-    try:
-        limit = float(context.args[1])
-    except ValueError:
-        await update.message.reply_text("Amount must be a number.")
-        return
-
-    group_id = get_user_group_id(update.effective_user.id)
-
-    conn = sqlite3.connect("expenses.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO budgets (category, limit_amount, group_id)
-        VALUES (?, ?, ?)
-        ON CONFLICT(category, group_id) DO UPDATE SET limit_amount=excluded.limit_amount
-    """, (category, limit, group_id))
-    conn.commit()
-    conn.close()
-
-    await update.message.reply_text(f"Budget set for {category}: {limit}")
-
-# ===================== ADD EXPENSE (with budget alert) =====================
+# ===================== EXPENSE COMMANDS =====================
 @require_group
 async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -319,28 +284,57 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), update.effective_user.first_name, amount, category, note, group_id)
     )
 
-    # Check budget exceed
-    cursor.execute("""
-        SELECT SUM(amount) FROM expenses
-        WHERE category=? AND group_id=?
-    """, (category, group_id))
-    total_spent = cursor.fetchone()[0] or 0
-
-    cursor.execute("""
-        SELECT limit_amount FROM budgets
-        WHERE category=? AND group_id=?
-    """, (category, group_id))
+    # Check budget
+    cursor.execute("SELECT limit_amount FROM budgets WHERE category=? AND group_id=?", (category, group_id))
     budget = cursor.fetchone()
 
     conn.commit()
     conn.close()
 
-    if budget and total_spent > budget[0]:
-        await update.message.reply_text(f"⚠️ Alert: Budget exceeded for {category}! Spent {total_spent}/{budget[0]}")
+    msg = f"Added expense: {amount} in {category}"
+    if budget:
+        limit = budget[0]
+        cursor_sum = sqlite3.connect("expenses.db").cursor()
+        cursor_sum.execute("SELECT SUM(amount) FROM expenses WHERE category=? AND group_id=?", (category, group_id))
+        total = cursor_sum.fetchone()[0] or 0
+        cursor_sum.connection.close()
 
-    await update.message.reply_text(f"Added expense: {amount} in {category}")
+        if total > limit:
+            msg += f"\n⚠️ Over budget! ({total}/{limit})"
+        elif total > 0.8 * limit:
+            msg += f"\n⚠️ Near budget limit ({total}/{limit})"
 
-# ===================== LIST CATEGORIES =====================
+    await update.message.reply_text(msg)
+
+# ===================== BUDGET COMMAND =====================
+@require_group
+async def set_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /setbudget <category> <limit>")
+        return
+
+    category = context.args[0]
+    try:
+        limit = float(context.args[1])
+    except:
+        await update.message.reply_text("Limit must be a number.")
+        return
+
+    group_id = get_user_group_id(update.effective_user.id)
+
+    conn = sqlite3.connect("expenses.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO budgets (category, limit_amount, group_id)
+        VALUES (?, ?, ?)
+        ON CONFLICT(category, group_id) DO UPDATE SET limit_amount=excluded.limit_amount
+    """, (category, limit, group_id))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(f"Budget for '{category}' set to {limit}")
+
+# ===================== CATEGORY REPORT =====================
 @require_group
 async def list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_id = get_user_group_id(update.effective_user.id)
@@ -348,11 +342,8 @@ async def list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect("expenses.db")
     cursor = conn.cursor()
 
-    cursor.execute("""
-        SELECT category, SUM(amount) FROM expenses
-        WHERE group_id=? GROUP BY category
-    """, (group_id,))
-    spent = cursor.fetchall()
+    cursor.execute("SELECT category, SUM(amount) FROM expenses WHERE group_id=? GROUP BY category", (group_id,))
+    spent = dict(cursor.fetchall())
 
     cursor.execute("SELECT category, limit_amount FROM budgets WHERE group_id=?", (group_id,))
     budgets = dict(cursor.fetchall())
@@ -360,20 +351,28 @@ async def list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not spent and not budgets:
-        await update.message.reply_text("No expenses or budgets set yet.")
+        await update.message.reply_text("No categories or budgets set.")
         return
 
+    over_budget = []
     message = "Category Spendings:\n"
-    for cat, total in spent:
-        limit = budgets.get(cat)
+    for category in set(list(spent.keys()) + list(budgets.keys())):
+        total = spent.get(category, 0)
+        limit = budgets.get(category)
         if limit:
-            message += f"{cat}: {total}/{limit}\n"
+            if total > limit:
+                status = "🔴 Over budget"
+                over_budget.append(category)
+            elif total > 0.8 * limit:
+                status = "🟡 Near limit"
+            else:
+                status = "🟢 OK"
+            message += f"{category}: {total}/{limit} {status}\n"
         else:
-            message += f"{cat}: {total}\n"
+            message += f"{category}: {total}\n"
 
-    for cat, limit in budgets.items():
-        if cat not in [c for c, _ in spent]:
-            message += f"{cat}: 0/{limit}\n"
+    if over_budget:
+        message = "⚠️ Warning: Budgets exceeded for: " + ", ".join(over_budget) + "\n\n" + message
 
     await update.message.reply_text(message)
 
@@ -385,6 +384,7 @@ async def list_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect("expenses.db")
     cursor = conn.cursor()
+
     cursor.execute("""
         SELECT date(timestamp), amount, category, note
         FROM expenses
@@ -392,19 +392,36 @@ async def list_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ORDER BY timestamp ASC
     """, (month, group_id))
     rows = cursor.fetchall()
+
+    cursor.execute("SELECT category, limit_amount FROM budgets WHERE group_id=?", (group_id,))
+    budgets = dict(cursor.fetchall())
+
+    totals = {}
+    for _, amount, category, _ in rows:
+        totals[category] = totals.get(category, 0) + amount
+
     conn.close()
 
     if not rows:
         await update.message.reply_text("No expenses this month.")
         return
 
-    message = "Expenses this month:\n"
+    message = f"Expenses for {month}:\n"
     for row in rows:
         message += f"{row[0]}: {row[1]} ({row[2]}) - {row[3]}\n"
 
+    message += "\n--- Totals vs Budget ---\n"
+    for cat, total in totals.items():
+        limit = budgets.get(cat)
+        if limit:
+            status = "🔴 Over" if total > limit else ("🟡 Near" if total > 0.8 * limit else "🟢 OK")
+            message += f"{cat}: {total}/{limit} {status}\n"
+        else:
+            message += f"{cat}: {total}\n"
+
     await update.message.reply_text(message)
 
-# ===================== RESET =====================
+# ===================== RESET COMMAND =====================
 @require_group
 async def reset_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['reset_pending'] = True
@@ -439,13 +456,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/startgroup <name> - Create or join group\n"
         "/mygroup - Show current group\n"
         "/add <amount> <category> <note> - Add expense\n"
+        "/setbudget <category> <limit> - Set category budget\n"
         "/list - Show monthly expenses\n"
         "/categories - Show category spendings\n"
-        "/setbudget <category> <amount> - Set budget for category\n"
-        "/switchgroup <name> - Admin: switch group\n"
-        "/listusers - Admin: list users in current group\n"
-        "/listgroups - Admin: list all groups\n"
-        "/reset - Reset group data\n"
+        "/reset - Reset group data (confirmation required)\n"
     )
 
 # ===================== MAIN =====================
@@ -466,17 +480,17 @@ def main():
     app.add_handler(CommandHandler("listusers", listusers))
     app.add_handler(CommandHandler("listgroups", listgroups))
 
-    # Budget/Expense handlers
-    app.add_handler(CommandHandler("setbudget", set_budget))
+    # Expense handlers
     app.add_handler(CommandHandler("add", add_expense))
     app.add_handler(CommandHandler("list", list_expenses))
     app.add_handler(CommandHandler("categories", list_categories))
+    app.add_handler(CommandHandler("setbudget", set_budget))
 
     # Reset handlers
     app.add_handler(CommandHandler("reset", reset_group))
     app.add_handler(CommandHandler("confirmreset", confirm_reset))
 
-    # Help
+    # Others
     app.add_handler(CommandHandler("help", help_command))
 
     app.run_polling()
