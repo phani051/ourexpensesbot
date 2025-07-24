@@ -1,5 +1,5 @@
 # bot.py
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
 import os
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram.ext import (
@@ -25,11 +25,12 @@ from commands import (
     reset_group,
     confirm_reset,
     help_command,
-    export_data
+    export_data,
+    summary
 )
 from scheduler import auto_export_last_month
 
-load_dotenv()  # Load from .env in local development
+#load_dotenv()  # Load from .env in local development
 # Register command handlers
 def register_handlers(app):
     app.add_handler(CommandHandler("startgroup", startgroup))
@@ -47,6 +48,7 @@ def register_handlers(app):
     app.add_handler(CommandHandler("confirmreset", confirm_reset))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("export", export_data))
+    app.add_handler(CommandHandler("summary", summary))
 
 
 # Hook called after bot initialization

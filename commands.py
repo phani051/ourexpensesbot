@@ -3,6 +3,9 @@ from datetime import datetime
 from telegram import Update
 from telegram.ext import ContextTypes
 from utils import get_user_group_id, require_group
+from utils import get_current_month
+import os
+import pandas as pd
 
 # ===================== GROUP COMMANDS =====================
 
@@ -160,7 +163,6 @@ async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @require_group
 async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add a new expense."""
     if len(context.args) < 2:
         await update.message.reply_text("Usage: /add <amount> <category> [note]")
         return
@@ -168,25 +170,52 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amount = float(context.args[0])
     except ValueError:
-        await update.message.reply_text("❌ Invalid amount.")
+        await update.message.reply_text("Amount must be a number.")
         return
 
     category = context.args[1]
     note = " ".join(context.args[2:]) if len(context.args) > 2 else ""
-    user_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name
-    group_id = get_user_group_id(user_id)
+
+    user = update.effective_user.username or update.effective_user.first_name
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    group_id = get_user_group_id(update.effective_user.id)
 
     conn = sqlite3.connect("expenses.db")
     cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO expenses (timestamp, user, amount, category, note, group_id) VALUES (?, ?, ?, ?, ?, ?)",
-        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username, amount, category, note, group_id),
-    )
+    cursor.execute("""
+        INSERT INTO expenses (timestamp, user, amount, category, note, group_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (timestamp, user, amount, category, note, group_id))
+
+    # Check total expenses for this category in current month
+    current_month = get_current_month()
+    cursor.execute("""
+        SELECT SUM(amount) FROM expenses
+        WHERE strftime('%Y-%m', timestamp) = ? AND category = ? AND group_id = ?
+    """, (current_month, category, group_id))
+    total_expense = cursor.fetchone()[0] or 0
+
+    # Get budget for this category
+    cursor.execute("""
+        SELECT limit_amount FROM budgets
+        WHERE category = ? AND group_id = ?
+    """, (category, group_id))
+    budget_row = cursor.fetchone()
+
     conn.commit()
     conn.close()
 
-    await update.message.reply_text(f"💸 Expense added: *{amount}* in *{category}*", parse_mode="Markdown")
+    # Send confirmation
+    await update.message.reply_text(f"✅ Added expense: {amount:.2f} for *{category}*", parse_mode="Markdown")
+
+    # Send budget alert if applicable
+    if budget_row:
+        budget_limit = budget_row[0]
+        if total_expense >= budget_limit:
+            await update.message.reply_text(f"🔴 *Over budget!* {category} has exceeded the limit ({budget_limit:.2f}).", parse_mode="Markdown")
+        elif total_expense >= 0.8 * budget_limit:
+            await update.message.reply_text(f"⚠️ *Warning:* {category} is at 80% of its budget ({budget_limit:.2f}).", parse_mode="Markdown")
+
 
 
 @require_group
@@ -223,52 +252,117 @@ async def add_income(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @require_group
 async def list_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List current month's expenses."""
     group_id = get_user_group_id(update.effective_user.id)
+    current_month = get_current_month()
+
     conn = sqlite3.connect("expenses.db")
     cursor = conn.cursor()
 
-    current_month = datetime.now().strftime("%Y-%m")
-    cursor.execute(
-        "SELECT timestamp, user, amount, category, note FROM expenses WHERE group_id=? AND timestamp LIKE ?",
-        (group_id, f"{current_month}%"),
-    )
+    # Fetch expenses
+    cursor.execute("""
+        SELECT timestamp, user, amount, category, note
+        FROM expenses
+        WHERE group_id=? AND strftime('%Y-%m', timestamp) = ?
+        ORDER BY timestamp DESC
+    """, (group_id, current_month))
     rows = cursor.fetchall()
+
+    # Fetch total expenses
+    cursor.execute("""
+        SELECT COALESCE(SUM(amount), 0)
+        FROM expenses
+        WHERE group_id=? AND strftime('%Y-%m', timestamp) = ?
+    """, (group_id, current_month))
+    total_expenses = cursor.fetchone()[0] or 0
+
+    # Fetch total income
+    cursor.execute("""
+        SELECT COALESCE(SUM(amount), 0)
+        FROM income
+        WHERE group_id=? AND strftime('%Y-%m', timestamp) = ?
+    """, (group_id, current_month))
+    total_income = cursor.fetchone()[0] or 0
+
     conn.close()
 
+    # Calculate balance
+    balance = total_income - total_expenses
+
     if not rows:
-        await update.message.reply_text("📭 No expenses recorded this month.")
+        await update.message.reply_text("No expenses recorded this month. 💡 Use /add to add one!")
         return
 
-    text = "📋 *This Month's Expenses:*\n\n"
-    for row in rows:
-        timestamp, user, amount, category, note = row
-        text += f"- {timestamp} | {user} | {amount} | {category} | {note}\n"
+    # Build text
+    text = "📋 *Monthly Expenses:*\n\n"
+    for ts, user, amount, category, note in rows:
+        note_text = f" - {note}" if note else ""
+        text += f"• `{ts}` - *{user}*: ₹{amount} ({category}){note_text}\n"
 
-    await update.message.reply_text(text, parse_mode="HTML")
+    text += "\n---\n"
+    text += f"💰 *Income:* ₹{total_income}\n"
+    text += f"💸 *Expenses:* ₹{total_expenses}\n"
+    text += f"🏦 *Balance:* ₹{balance}\n"
+
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 @require_group
 async def list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List category budgets."""
     group_id = get_user_group_id(update.effective_user.id)
+    current_month = get_current_month()
+
     conn = sqlite3.connect("expenses.db")
     cursor = conn.cursor()
 
-    cursor.execute("SELECT category, limit_amount FROM budgets WHERE group_id=?", (group_id,))
-    rows = cursor.fetchall()
+    # Fetch total expenses grouped by category for the month
+    cursor.execute("""
+        SELECT category, SUM(amount)
+        FROM expenses
+        WHERE strftime('%Y-%m', timestamp) = ? AND group_id = ?
+        GROUP BY category
+    """, (current_month, group_id))
+    expenses_data = cursor.fetchall()
+
+    # Fetch budgets for this group
+    cursor.execute("""
+        SELECT category, limit_amount
+        FROM budgets
+        WHERE group_id = ?
+    """, (group_id,))
+    budgets = dict(cursor.fetchall())  # {category: limit_amount}
+
     conn.close()
 
-    if not rows:
-        await update.message.reply_text("📭 No budgets set yet.")
+    # If no expenses exist at all
+    if not expenses_data and not budgets:
+        await update.message.reply_text("No expenses or budgets found for this month.")
         return
 
-    text = "📊 *Category Budgets:*\n\n"
-    for row in rows:
-        category, limit_amount = row
-        text += f"- {category}: {limit_amount}\n"
+    # Build response
+    text = "📊 *Category Summary*\n\n"
+    for category, total in expenses_data:
+        budget_text = ""
+        warning_icon = ""
+
+        if category in budgets:
+            limit = budgets[category]
+            # Check budget status
+            if total >= limit:
+                warning_icon = " 🔴"  # Over budget
+            elif total >= 0.8 * limit:
+                warning_icon = " ⚠️"  # Approaching limit
+
+            budget_text = f" (Budget: {limit:.2f})"
+
+        text += f"• {category}: {total:.2f}{budget_text}{warning_icon}\n"
+
+    # Show any budgets with no expenses
+    for category, limit in budgets.items():
+        if category not in [row[0] for row in expenses_data]:
+            text += f"• {category}: 0.00 (Budget: {limit:.2f})\n"
 
     await update.message.reply_text(text, parse_mode="Markdown")
+
 
 
 @require_group
@@ -325,66 +419,113 @@ async def confirm_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ===================== EXPORT COMMAND =====================
-
 @require_group
 async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Export all data for the group."""
     group_id = get_user_group_id(update.effective_user.id)
+    now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    filename = f"export_{now}.xlsx"
+
     conn = sqlite3.connect("expenses.db")
-    cursor = conn.cursor()
 
-    cursor.execute(
-        "SELECT timestamp, user, amount, category, note FROM expenses WHERE group_id=?",
-        (group_id,),
+    # Expenses
+    expenses_df = pd.read_sql_query(
+        "SELECT timestamp, user, amount, category, note FROM expenses WHERE group_id = ?",
+        conn,
+        params=(group_id,)
     )
-    expenses = cursor.fetchall()
 
-    cursor.execute(
-        "SELECT timestamp, user, amount, note FROM income WHERE group_id=?",
-        (group_id,),
+    # Income
+    income_df = pd.read_sql_query(
+        "SELECT timestamp, user, amount, note FROM income WHERE group_id = ?",
+        conn,
+        params=(group_id,)
     )
-    income = cursor.fetchall()
 
     conn.close()
 
-    # Format data for export
-    text = "📤 *Export Data:*\n\n*Expenses:*\n"
-    for row in expenses:
-        text += f"- {row[0]} | {row[1]} | {row[2]} | {row[3]} | {row[4]}\n"
+    # Save to Excel with two sheets
+    with pd.ExcelWriter(filename, engine="xlsxwriter") as writer:
+        expenses_df.to_excel(writer, sheet_name="Expenses", index=False)
+        income_df.to_excel(writer, sheet_name="Income", index=False)
 
-    text += "\n*Income:*\n"
-    for row in income:
-        text += f"- {row[0]} | {row[1]} | {row[2]} | {row[3]}\n"
+    # Send the file
+    with open(filename, "rb") as f:
+        await update.message.reply_document(f, filename=filename, caption="📊 Exported Income & Expenses")
+
+    # Clean up
+    os.remove(filename)
+
+@require_group
+async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show monthly summary: income, expenses, balance"""
+    group_id = get_user_group_id(update.effective_user.id)
+    current_month = get_current_month()
+
+    conn = sqlite3.connect("expenses.db")
+    cursor = conn.cursor()
+
+    # Total income
+    cursor.execute("""
+        SELECT SUM(amount) FROM income
+        WHERE strftime('%Y-%m', timestamp) = ? AND group_id = ?
+    """, (current_month, group_id))
+    total_income = cursor.fetchone()[0] or 0
+
+    # Total expenses
+    cursor.execute("""
+        SELECT SUM(amount) FROM expenses
+        WHERE strftime('%Y-%m', timestamp) = ? AND group_id = ?
+    """, (current_month, group_id))
+    total_expenses = cursor.fetchone()[0] or 0
+
+    # Balance
+    balance = total_income - total_expenses
+
+    # Per-category breakdown (optional)
+    cursor.execute("""
+        SELECT category, SUM(amount) FROM expenses
+        WHERE strftime('%Y-%m', timestamp) = ? AND group_id = ?
+        GROUP BY category
+    """, (current_month, group_id))
+    category_data = cursor.fetchall()
+
+    conn.close()
+
+    # Format summary
+    text = f"📊 *Monthly Summary ({current_month})*\n\n"
+    text += f"💰 *Income:* `{total_income:.2f}`\n"
+    text += f"💸 *Expenses:* `{total_expenses:.2f}`\n"
+    text += f"🏦 *Balance:* `{balance:.2f}`\n\n"
+
+    if category_data:
+        text += "*By Category:*\n"
+        for category, amount in category_data:
+            text += f"  • {category}: `{amount:.2f}`\n"
 
     await update.message.reply_text(text, parse_mode="Markdown")
+
 
 
 # ===================== HELP COMMAND =====================
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show help text with emojis."""
-    help_text = """
-ℹ️ *Available Commands:*
-
-👥 /startgroup <name> – Create or join a group  
-👀 /mygroup – Show your current group  
-📋 /listgroups – List all groups  
-🔄 /switchgroup <name> – Switch to another group  
-
-👥 /listusers – List users in your group  
-🗑️ /removeuser <username> – Remove a user from group  
-
-💸 /add <amount> <category> [note] – Add an expense  
-💰 /income <amount> [note] – Add an income  
-
-📊 /list – Show this month’s expenses  
-📂 /categories – Show budgets for categories  
-🎯 /setbudget <category> <limit> – Set budget for category  
-
-⚠️ /reset – Reset group data (asks confirmation)  
-✅ /confirmreset – Confirm group reset  
-
-📤 /export – Export all group data  
-❓ /help – Show this help message
-"""
-    await update.message.reply_text(help_text, parse_mode="Markdown")
+    text = (
+        "🤖 *Available Commands:*\n\n"
+        "🏠 /startgroup `<name>` - Create or join a group\n"
+        "👥 /mygroup - Show your current group\n"
+        "📋 /listgroups – List all groups\n"
+        "📋 /listusers - List users in your group\n"
+        "❌ /removeuser `<username>` - Remove a user from group\n"
+        "🔄 /switchgroup `<name>` - Switch between groups\n"
+        "➕ /add `<amount> <category> [note]` - Add an expense\n"
+        "💵 /income `<amount> [note]` - Add income\n"
+        "📜 /list - List current month expenses\n"
+        "📊 /categories - Show category-wise budgets and usage\n"
+        "🎯 /setbudget `<category> <amount>` - Set budget for a category\n"
+        "♻ /reset - Reset all group data\n"
+        "✅ /confirmreset - Confirm reset after /reset\n"
+        "📂 /export - Export data to Excel\n"
+        "📑 /summary - Monthly summary (income, expenses, balance)\n"
+        "ℹ️ /help - Show this help message\n"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")

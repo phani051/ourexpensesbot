@@ -1,0 +1,9 @@
+Timestamp,User,Amount,Category,Note
+2025-07-24 13:56:47,Phani,15000.0,rent,
+2025-07-24 13:57:03,Phani,2000.0,groceries,
+2025-07-24 13:57:25,Phani,500.0,food,fruits
+2025-07-24 13:57:38,Phani,1500.0,outing,dinner
+2025-07-24 13:59:25,Phani,15000.0,SIP,
+2025-07-24 13:59:35,Phani,35000.0,House_loan,
+2025-07-24 13:59:49,Phani,19000.0,personal_loan,
+2025-07-24 14:00:05,Phani,5400.0,term_insurance,

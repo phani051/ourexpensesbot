@@ -3,14 +3,21 @@ from telegram import BotCommand
 
 async def set_bot_commands(app):
     commands = [
-        BotCommand("startgroup", "Create or join a group"),
-        BotCommand("mygroup", "Show your current group"),
-        BotCommand("add", "Add expense"),
-        BotCommand("setbudget", "Set category budget"),
-        BotCommand("list", "List current month expenses"),
-        BotCommand("categories", "Show categories & budgets"),
-        BotCommand("reset", "Reset group data"),
-        BotCommand("help", "Show help"),
-        BotCommand("export", "Export data to Excel")
+        BotCommand("startgroup", "🏠 Create or join a group"),
+        BotCommand("mygroup", "👥 Show your current group"),
+        BotCommand("listusers", "📋 List users in your group"),
+        BotCommand("removeuser", "❌ Remove a user from group"),
+        BotCommand("listgroups", "🌐 List all groups"),
+        BotCommand("switchgroup", "🔄 Switch to another group"),
+        BotCommand("add", "➕ Add an expense"),
+        BotCommand("income", "💵 Add income"),
+        BotCommand("list", "📜 List expenses"),
+        BotCommand("categories", "📊 Category budgets"),
+        BotCommand("setbudget", "🎯 Set budget"),
+        BotCommand("reset", "♻ Reset group data"),
+        BotCommand("confirmreset", "✅ Confirm reset"),
+        BotCommand("export", "📂 Export data to Excel"),
+        BotCommand("summary", "📑 Monthly summary"),  # Emoji added
+        BotCommand("help", "ℹ️ Show help"),
     ]
     await app.bot.set_my_commands(commands)
