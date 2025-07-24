@@ -376,6 +376,46 @@ async def list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(message)
 
+async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: Remove a user from the current group by username."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Only admin can remove users.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /removeuser <username>")
+        return
+
+    username = context.args[0]
+    group_id = get_user_group_id(update.effective_user.id)
+
+    if not group_id:
+        await update.message.reply_text("Admin is not currently assigned to a group.")
+        return
+
+    conn = sqlite3.connect("expenses.db")
+    cursor = conn.cursor()
+
+    # Verify user exists in group
+    cursor.execute(
+        "SELECT user_id FROM users WHERE username=? AND group_id=?",
+        (username, group_id)
+    )
+    user_row = cursor.fetchone()
+
+    if not user_row:
+        await update.message.reply_text(f"User '{username}' not found in this group.")
+        conn.close()
+        return
+
+    # Remove user
+    cursor.execute("DELETE FROM users WHERE username=? AND group_id=?", (username, group_id))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(f"User '{username}' has been removed from the group.")
+
+
 # ===================== LIST EXPENSES =====================
 @require_group
 async def list_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -531,6 +571,7 @@ def main():
     app.add_handler(CommandHandler("switchgroup", switchgroup))
     app.add_handler(CommandHandler("listusers", listusers))
     app.add_handler(CommandHandler("listgroups", listgroups))
+    app.add_handler(CommandHandler("removeuser", remove_user))
 
     # Expense handlers
     app.add_handler(CommandHandler("add", add_expense))
@@ -545,6 +586,7 @@ def main():
 
     # Others
     app.add_handler(CommandHandler("help", help_command))
+    
 
     app.run_polling()
 
