@@ -89,10 +89,18 @@ async def on_startup():
     # Auto-set webhook
     set_webhook()
 
+# -------- Start PTB Application --------
+async def start_bot():
+    await application.initialize()
+    await application.start()
+    print("Telegram bot started (listening via webhook).")
+
 # -------- Flask Endpoints --------
 @app_flask.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
+    print("Webhook called!")  # Debug log
     json_update = request.get_json(force=True)
+    print("Update received:", json_update)  # Log update payload
     update = Update.de_json(json_update, application.bot)
     application.update_queue.put_nowait(update)
     return "OK", 200
@@ -119,9 +127,10 @@ def main():
 
         port = int(os.environ.get("PORT", 5000))
 
-        # Run startup tasks manually (async)
+        # Run startup tasks and start PTB bot
         import asyncio
         asyncio.run(on_startup())
+        asyncio.run(start_bot())
 
         print(f"Starting Flask server on port {port}...")
         app_flask.run(host="0.0.0.0", port=port)
