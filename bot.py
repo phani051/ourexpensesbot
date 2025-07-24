@@ -385,6 +385,7 @@ async def list_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect("expenses.db")
     cursor = conn.cursor()
 
+    # Fetch expenses for the month
     cursor.execute("""
         SELECT date(timestamp), amount, category, note
         FROM expenses
@@ -393,17 +394,37 @@ async def list_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """, (month, group_id))
     rows = cursor.fetchall()
 
+    # Fetch budgets
     cursor.execute("SELECT category, limit_amount FROM budgets WHERE group_id=?", (group_id,))
     budgets = dict(cursor.fetchall())
 
-    totals = {}
-    for _, amount, category, _ in rows:
-        totals[category] = totals.get(category, 0) + amount
+    # Fetch income total
+    cursor.execute("""
+        SELECT COALESCE(SUM(amount), 0)
+        FROM income
+        WHERE strftime('%Y-%m', timestamp) = ? AND group_id = ?
+    """, (month, group_id))
+    total_income = cursor.fetchone()[0]
 
     conn.close()
 
+    # Calculate totals per category and total expenses
+    totals = {}
+    total_expenses = 0
+    for _, amount, category, _ in rows:
+        totals[category] = totals.get(category, 0) + amount
+        total_expenses += amount
+
+    balance = total_income - total_expenses
+
+    # Prepare message
     if not rows:
-        await update.message.reply_text("No expenses this month.")
+        await update.message.reply_text(
+            f"No expenses this month.\n\n"
+            f"Total Income: {total_income}\n"
+            f"Total Expenses: {total_expenses}\n"
+            f"Balance: {balance}"
+        )
         return
 
     message = f"Expenses for {month}:\n"
@@ -419,7 +440,13 @@ async def list_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             message += f"{cat}: {total}\n"
 
+    message += "\n--- Summary ---\n"
+    message += f"Total Income: {total_income}\n"
+    message += f"Total Expenses: {total_expenses}\n"
+    message += f"Balance: {balance}\n"
+
     await update.message.reply_text(message)
+
 
 # ===================== RESET COMMAND =====================
 @require_group
@@ -449,6 +476,30 @@ async def confirm_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['reset_pending'] = False
     await update.message.reply_text("Group data has been completely reset.")
 
+# ===================== INCOME COMMAND =====================
+@require_group
+async def add_income(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amount = float(context.args[0])
+        note = " ".join(context.args[1:]) if len(context.args) > 1 else ""
+    except:
+        await update.message.reply_text("Usage: /income <amount> <note>")
+        return
+
+    group_id = get_user_group_id(update.effective_user.id)
+
+    conn = sqlite3.connect("expenses.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO income (timestamp, user, amount, note, group_id) VALUES (?, ?, ?, ?, ?)",
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), update.effective_user.first_name, amount, note, group_id)
+    )
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(f"Income added: {amount}")
+
+
 # ===================== HELP =====================
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -460,6 +511,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/list - Show monthly expenses\n"
         "/categories - Show category spendings\n"
         "/reset - Reset group data (confirmation required)\n"
+        "/income <amount> <note> - Add income\n"
     )
 
 # ===================== MAIN =====================
@@ -485,6 +537,7 @@ def main():
     app.add_handler(CommandHandler("list", list_expenses))
     app.add_handler(CommandHandler("categories", list_categories))
     app.add_handler(CommandHandler("setbudget", set_budget))
+    app.add_handler(CommandHandler("income", add_income))
 
     # Reset handlers
     app.add_handler(CommandHandler("reset", reset_group))
