@@ -1,4 +1,6 @@
 import os
+import threading
+import asyncio
 import requests
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Update
@@ -9,32 +11,19 @@ from db import init_db
 from config import BOT_TOKEN
 from menu import set_bot_commands
 from commands import (
-    startgroup,
-    mygroup,
-    listusers,
-    remove_user,
-    listgroups,
-    switchgroup,
-    add_expense,
-    add_income,
-    list_expenses,
-    list_categories,
-    set_budget,
-    reset_group,
-    confirm_reset,
-    help_command,
-    export_data,
-    summary
+    startgroup, mygroup, listusers, remove_user, listgroups, switchgroup,
+    add_expense, add_income, list_expenses, list_categories, set_budget,
+    reset_group, confirm_reset, help_command, export_data, summary
 )
 from scheduler import auto_export_last_month
 
-# ---------------- Flask Initialization ----------------
+# -------- Flask App --------
 app_flask = Flask(__name__)
 
-# ---------------- Telegram Bot Initialization ----------------
+# -------- Telegram Bot --------
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# ---------------- Register Command Handlers ----------------
+# Register handlers
 def register_handlers(app):
     app.add_handler(CommandHandler("startgroup", startgroup))
     app.add_handler(CommandHandler("mygroup", mygroup))
@@ -55,7 +44,7 @@ def register_handlers(app):
 
 register_handlers(application)
 
-# ---------------- Auto-set Webhook ----------------
+# -------- Webhook Setup --------
 def set_webhook():
     render_url = os.getenv("RENDER_URL", "")
     if not render_url:
@@ -64,40 +53,36 @@ def set_webhook():
 
     webhook_url = f"{render_url}/{BOT_TOKEN}"
     api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}"
-
+    print(f"Setting webhook to {webhook_url}")
     try:
-        print(f"Setting webhook to {webhook_url}")
-        response = requests.get(api_url)
-        print("Webhook set response:", response.json())
+        resp = requests.get(api_url)
+        print("Webhook set response:", resp.json())
     except Exception as e:
         print("Error setting webhook:", e)
 
-# ---------------- Startup Hook ----------------
-async def on_startup():
-    # Set bot commands
+# -------- Startup for PTB --------
+async def bot_startup():
     await set_bot_commands(application)
-
-    # Start scheduler
     scheduler = AsyncIOScheduler()
     scheduler.add_job(auto_export_last_month, "cron", hour=0, minute=10, args=[application])
     scheduler.start()
     print("Scheduler started.")
-
-    # Auto-set webhook
     set_webhook()
 
-# ---------------- Start PTB Application ----------------
-async def start_bot():
     await application.initialize()
     await application.start()
-    print("Telegram bot started (listening via webhook).")
+    print("Telegram bot started (webhook mode).")
 
-# ---------------- Flask Endpoints ----------------
+# Run bot in background thread
+def start_bot_thread():
+    asyncio.run(bot_startup())
+
+# -------- Flask Endpoints --------
 @app_flask.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
-    print("Webhook called!")  # Debug log
+    print("Webhook called!")
     json_update = request.get_json(force=True)
-    print("Update received:", json_update)  # Debug log
+    print("Update received:", json_update)
     update = Update.de_json(json_update, application.bot)
     application.update_queue.put_nowait(update)
     return "OK", 200
@@ -108,30 +93,23 @@ def index():
 
 @app_flask.route("/debug", methods=['GET'])
 def debug_webhook():
-    """Check current webhook status from Telegram API."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo"
     try:
-        resp = requests.get(url).json()
-        return jsonify(resp), 200
+        return jsonify(requests.get(url).json()), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ---------------- Main Entrypoint ----------------
+# -------- Main --------
 def main():
     try:
         print("Initializing DB...")
         init_db()
 
+        # Start PTB bot in background
+        threading.Thread(target=start_bot_thread, daemon=True).start()
+
+        # Start Flask server (Render detects this port)
         port = int(os.environ.get("PORT", 5000))
-
-        # Run both async startup tasks on single event loop
-        async def startup():
-            await on_startup()
-            await start_bot()
-
-        import asyncio
-        asyncio.run(startup())
-
         print(f"Starting Flask server on port {port}...")
         app_flask.run(host="0.0.0.0", port=port)
     except Exception as e:
