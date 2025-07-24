@@ -1,5 +1,9 @@
 import sqlite3
 from telegram import Update, BotCommand
+from datetime import timedelta
+import asyncio
+import os
+import pandas as pd
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -63,6 +67,15 @@ def init_db():
     )
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS alerts (
+        group_id INTEGER,
+        category TEXT,
+        last_alert TEXT,
+        UNIQUE(group_id, category)
+    )
+    """)
+
     # Migration: add missing columns
     def add_column_if_missing(table, column, definition):
         try:
@@ -123,6 +136,39 @@ def require_group(func):
 def get_current_month():
     return datetime.now().strftime("%Y-%m")
 
+
+from datetime import timedelta
+
+def should_send_alert(group_id, category):
+    """Check if 24 hours passed since last alert for this category/group."""
+    conn = sqlite3.connect("expenses.db")
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT last_alert FROM alerts WHERE group_id=? AND category=?",
+        (group_id, category)
+    )
+    row = cursor.fetchone()
+
+    now = datetime.now()
+    if row:
+        last_alert = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+        if now - last_alert < timedelta(hours=24):
+            conn.close()
+            return False  # Don't send again
+
+    # Insert or update alert timestamp
+    cursor.execute("""
+        INSERT INTO alerts (group_id, category, last_alert)
+        VALUES (?, ?, ?)
+        ON CONFLICT(group_id, category) DO UPDATE SET last_alert=excluded.last_alert
+    """, (group_id, category, now.strftime("%Y-%m-%d %H:%M:%S")))
+
+    conn.commit()
+    conn.close()
+    return True
+
+
 # ===================== MENU BUTTON =====================
 async def set_bot_commands(app):
     commands = [
@@ -133,6 +179,7 @@ async def set_bot_commands(app):
         BotCommand("list", "List current month expenses"),
         BotCommand("categories", "Show categories & budgets"),
         BotCommand("reset", "Reset group data"),
+        BotCommand("export", "Export expenses and income to Excel"),
         BotCommand("help", "Show help")
     ]
     await app.bot.set_my_commands(commands)
@@ -166,10 +213,12 @@ async def startgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("INSERT INTO groups (name) VALUES (?)", (group_name,))
         group_id = cursor.lastrowid
 
+    username = update.effective_user.username or update.effective_user.first_name or "Unknown"
+
     cursor.execute("""
         INSERT OR REPLACE INTO users (user_id, username, group_id)
         VALUES (?, ?, ?)
-    """, (user_id, update.effective_user.username, group_id))
+    """, (user_id, username, group_id))
 
     conn.commit()
     conn.close()
@@ -310,6 +359,43 @@ async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"User '{username}' has been removed from the group.")
 
+@require_group
+async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    group_id = get_user_group_id(update.effective_user.id)
+    month = get_current_month()
+
+    conn = sqlite3.connect("expenses.db")
+
+    # --- Export Expenses ---
+    expenses_df = pd.read_sql_query(f"""
+        SELECT timestamp, user, amount, category, note
+        FROM expenses
+        WHERE group_id = {group_id} AND strftime('%Y-%m', timestamp) = '{month}'
+        ORDER BY timestamp ASC
+    """, conn)
+
+    # --- Export Income ---
+    income_df = pd.read_sql_query(f"""
+        SELECT timestamp, user, amount, note
+        FROM income
+        WHERE group_id = {group_id} AND strftime('%Y-%m', timestamp) = '{month}'
+        ORDER BY timestamp ASC
+    """, conn)
+
+    conn.close()
+
+    # Save to Excel
+    filename = f"export_{month}.xlsx"
+    with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+        expenses_df.to_excel(writer, index=False, sheet_name="Expenses")
+        income_df.to_excel(writer, index=False, sheet_name="Income")
+
+    # Send file
+    await update.message.reply_document(document=open(filename, "rb"), filename=filename)
+
+    # Clean up
+    os.remove(filename)
+
 # ===================== EXPENSE COMMANDS =====================
 @require_group
 async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -347,6 +433,16 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if total > limit:
             msg += f"\n⚠️ Over budget! ({total}/{limit})"
+        elif total > 0.8 * limit:
+            msg += f"\n⚠️ Near budget limit ({total}/{limit})"
+
+        if total > limit:
+            msg += f"\n⚠️ Over budget! ({total}/{limit})"
+            # Trigger one alert every 24h
+            if should_send_alert(group_id, category):
+                await update.message.reply_text(
+                    f"⚠️ ALERT: '{category}' budget exceeded!\nTotal: {total}, Limit: {limit}"
+                )
         elif total > 0.8 * limit:
             msg += f"\n⚠️ Near budget limit ({total}/{limit})"
 
@@ -544,6 +640,84 @@ async def confirm_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['reset_pending'] = False
     await update.message.reply_text("Group data has been completely reset.")
 
+async def auto_export_last_month():
+    """Generate and send last month's export to all groups."""
+    conn = sqlite3.connect("expenses.db")
+    cursor = conn.cursor()
+
+    # Get all groups
+    cursor.execute("SELECT id, name FROM groups")
+    groups = cursor.fetchall()
+
+    # Determine last month
+    today = datetime.now()
+    first_day_this_month = datetime(today.year, today.month, 1)
+    last_month_date = first_day_this_month - timedelta(days=1)
+    last_month = last_month_date.strftime("%Y-%m")
+
+    for group_id, group_name in groups:
+        # Export expenses
+        expenses_df = pd.read_sql_query(f"""
+            SELECT timestamp, user, amount, category, note
+            FROM expenses
+            WHERE group_id = {group_id} AND strftime('%Y-%m', timestamp) = '{last_month}'
+            ORDER BY timestamp ASC
+        """, conn)
+
+        # Export income
+        income_df = pd.read_sql_query(f"""
+            SELECT timestamp, user, amount, note
+            FROM income
+            WHERE group_id = {group_id} AND strftime('%Y-%m', timestamp) = '{last_month}'
+            ORDER BY timestamp ASC
+        """, conn)
+
+        # Skip if no data
+        if expenses_df.empty and income_df.empty:
+            continue
+
+        # Save to Excel
+        filename = f"export_{group_name}_{last_month}.xlsx"
+        with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+            expenses_df.to_excel(writer, index=False, sheet_name="Expenses")
+            income_df.to_excel(writer, index=False, sheet_name="Income")
+
+        # Get users in this group
+        cursor.execute("SELECT user_id FROM users WHERE group_id=?", (group_id,))
+        users = cursor.fetchall()
+
+        # Send file to each user
+        from telegram import Bot
+        bot = Bot(BOT_TOKEN)
+        for (user_id,) in users:
+            try:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=f"Auto export for group '{group_name}' ({last_month})"
+                )
+                await bot.send_document(
+                    chat_id=user_id,
+                    document=open(filename, "rb"),
+                    filename=filename
+                )
+            except Exception as e:
+                print(f"Failed to send export to {user_id}: {e}")
+
+        os.remove(filename)
+
+    conn.close()
+
+
+
+
+async def daily_export_check():
+    """Background task to check every 24 hours for auto-export."""
+    while True:
+        today = datetime.now()
+        if today.day == datetime.now().day:
+            auto_export_last_month()
+        await asyncio.sleep(86400)  # wait 24 hours
+
 # ===================== HELP =====================
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -556,10 +730,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/categories - Show category spendings\n"
         "/reset - Reset group data (confirmation required)\n"
         "/income <amount> <note> - Add income\n"
-        "/listusers - Admin: list users in current group\n"
-        "/removeuser <username> - Admin: remove user from group\n"
-        "/listgroups - Admin: list all groups\n"
-        "/switchgroup <group_name> - Admin: switch active group\n"
+        #"/listusers - Admin: list users in current group\n"
+        #"/removeuser <username> - Admin: remove user from group\n"
+        #"/listgroups - Admin: list all groups\n"
+        #"/switchgroup <group_name> - Admin: switch active group\n"
+        "/export - export the expenses\n"
     )
 
 # ===================== MAIN =====================
@@ -594,6 +769,11 @@ def main():
 
     # Others
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("export", export_data))
+
+    # Start background task
+    loop = asyncio.get_event_loop()
+    loop.create_task(daily_export_check())
 
     app.run_polling()
 
