@@ -90,6 +90,13 @@ def init_db():
     cursor.execute("DROP TABLE budgets")
     cursor.execute("ALTER TABLE budgets_new RENAME TO budgets")
 
+    # Migration: Fix null usernames
+    cursor.execute("""
+        UPDATE users
+        SET username = 'Unknown'
+        WHERE username IS NULL OR username = ''
+    """)
+
     conn.commit()
     conn.close()
 
@@ -264,6 +271,45 @@ async def listgroups(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(message)
 
+async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: Remove a user from the current group by username."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Only admin can remove users.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /removeuser <username>")
+        return
+
+    username = context.args[0]
+    group_id = get_user_group_id(update.effective_user.id)
+
+    if not group_id:
+        await update.message.reply_text("Admin is not currently assigned to a group.")
+        return
+
+    conn = sqlite3.connect("expenses.db")
+    cursor = conn.cursor()
+
+    # Verify user exists in group
+    cursor.execute(
+        "SELECT user_id FROM users WHERE username=? AND group_id=?",
+        (username, group_id)
+    )
+    user_row = cursor.fetchone()
+
+    if not user_row:
+        await update.message.reply_text(f"User '{username}' not found in this group.")
+        conn.close()
+        return
+
+    # Remove user
+    cursor.execute("DELETE FROM users WHERE username=? AND group_id=?", (username, group_id))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(f"User '{username}' has been removed from the group.")
+
 # ===================== EXPENSE COMMANDS =====================
 @require_group
 async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -376,45 +422,28 @@ async def list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(message)
 
-async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only: Remove a user from the current group by username."""
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Only admin can remove users.")
+# ===================== INCOME COMMAND =====================
+@require_group
+async def add_income(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amount = float(context.args[0])
+        note = " ".join(context.args[1:]) if len(context.args) > 1 else ""
+    except:
+        await update.message.reply_text("Usage: /income <amount> <note>")
         return
 
-    if not context.args:
-        await update.message.reply_text("Usage: /removeuser <username>")
-        return
-
-    username = context.args[0]
     group_id = get_user_group_id(update.effective_user.id)
-
-    if not group_id:
-        await update.message.reply_text("Admin is not currently assigned to a group.")
-        return
 
     conn = sqlite3.connect("expenses.db")
     cursor = conn.cursor()
-
-    # Verify user exists in group
     cursor.execute(
-        "SELECT user_id FROM users WHERE username=? AND group_id=?",
-        (username, group_id)
+        "INSERT INTO income (timestamp, user, amount, note, group_id) VALUES (?, ?, ?, ?, ?)",
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), update.effective_user.first_name, amount, note, group_id)
     )
-    user_row = cursor.fetchone()
-
-    if not user_row:
-        await update.message.reply_text(f"User '{username}' not found in this group.")
-        conn.close()
-        return
-
-    # Remove user
-    cursor.execute("DELETE FROM users WHERE username=? AND group_id=?", (username, group_id))
     conn.commit()
     conn.close()
 
-    await update.message.reply_text(f"User '{username}' has been removed from the group.")
-
+    await update.message.reply_text(f"Income added: {amount}")
 
 # ===================== LIST EXPENSES =====================
 @require_group
@@ -487,7 +516,6 @@ async def list_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(message)
 
-
 # ===================== RESET COMMAND =====================
 @require_group
 async def reset_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -516,30 +544,6 @@ async def confirm_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['reset_pending'] = False
     await update.message.reply_text("Group data has been completely reset.")
 
-# ===================== INCOME COMMAND =====================
-@require_group
-async def add_income(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        amount = float(context.args[0])
-        note = " ".join(context.args[1:]) if len(context.args) > 1 else ""
-    except:
-        await update.message.reply_text("Usage: /income <amount> <note>")
-        return
-
-    group_id = get_user_group_id(update.effective_user.id)
-
-    conn = sqlite3.connect("expenses.db")
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO income (timestamp, user, amount, note, group_id) VALUES (?, ?, ?, ?, ?)",
-        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), update.effective_user.first_name, amount, note, group_id)
-    )
-    conn.commit()
-    conn.close()
-
-    await update.message.reply_text(f"Income added: {amount}")
-
-
 # ===================== HELP =====================
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -552,6 +556,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/categories - Show category spendings\n"
         "/reset - Reset group data (confirmation required)\n"
         "/income <amount> <note> - Add income\n"
+        "/listusers - Admin: list users in current group\n"
+        "/removeuser <username> - Admin: remove user from group\n"
+        "/listgroups - Admin: list all groups\n"
+        "/switchgroup <group_name> - Admin: switch active group\n"
     )
 
 # ===================== MAIN =====================
@@ -586,7 +594,6 @@ def main():
 
     # Others
     app.add_handler(CommandHandler("help", help_command))
-    
 
     app.run_polling()
 
