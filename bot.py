@@ -44,16 +44,17 @@ def register_handlers(app):
 
 register_handlers(application)
 
-# -------- Webhook Setup --------
+# -------- Improved Webhook Setup --------
 def set_webhook():
-    render_url = os.getenv("RENDER_URL", "")
+    render_url = os.getenv("RENDER_URL", "").rstrip("/")  # strip trailing slash
     if not render_url:
         print("⚠️ RENDER_URL not set — webhook will not be configured.")
         return
 
     webhook_url = f"{render_url}/{BOT_TOKEN}"
     api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}"
-    print(f"Setting webhook to {webhook_url}")
+
+    print(f"Registering webhook with Telegram: {webhook_url}")  # Debug exact URL
     try:
         resp = requests.get(api_url)
         print("Webhook set response:", resp.json())
@@ -77,7 +78,17 @@ async def bot_startup():
 def start_bot_thread():
     asyncio.run(bot_startup())
 
-# -------- Flask Endpoints --------
+# -------- Debug: Log All Requests --------
+@app_flask.before_request
+def log_request():
+    print("\n=== Incoming Request ===")
+    print("Method:", request.method)
+    print("Path:", request.path)
+    print("Headers:", dict(request.headers))
+    print("Body:", request.get_data(as_text=True))
+    print("========================\n")
+
+# -------- Main Webhook Route --------
 @app_flask.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
     print("Webhook called!")
@@ -87,6 +98,13 @@ def webhook():
     application.update_queue.put_nowait(update)
     return "OK", 200
 
+# -------- Fallback POST Route (debug) --------
+@app_flask.route("/", methods=['POST'])
+def catch_all_post():
+    print("⚠️ POST received on root (not /BOT_TOKEN) — possible token mismatch!")
+    return "OK", 200
+
+# -------- Health & Debug Routes --------
 @app_flask.route("/", methods=['GET'])
 def index():
     return "Bot is running via webhook!", 200
@@ -99,7 +117,7 @@ def debug_webhook():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# -------- Main --------
+# -------- Main Entrypoint --------
 def main():
     try:
         print("Initializing DB...")
