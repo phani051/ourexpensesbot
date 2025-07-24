@@ -2,10 +2,7 @@ import os
 import requests
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler
 from flask import Flask, request, jsonify
 
 from db import init_db
@@ -31,13 +28,13 @@ from commands import (
 )
 from scheduler import auto_export_last_month
 
-# -------- Flask Initialization --------
+# ---------------- Flask Initialization ----------------
 app_flask = Flask(__name__)
 
-# -------- Telegram Bot Initialization --------
+# ---------------- Telegram Bot Initialization ----------------
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# -------- Register Command Handlers --------
+# ---------------- Register Command Handlers ----------------
 def register_handlers(app):
     app.add_handler(CommandHandler("startgroup", startgroup))
     app.add_handler(CommandHandler("mygroup", mygroup))
@@ -58,7 +55,7 @@ def register_handlers(app):
 
 register_handlers(application)
 
-# -------- Auto-set Webhook --------
+# ---------------- Auto-set Webhook ----------------
 def set_webhook():
     render_url = os.getenv("RENDER_URL", "")
     if not render_url:
@@ -75,7 +72,7 @@ def set_webhook():
     except Exception as e:
         print("Error setting webhook:", e)
 
-# -------- Startup Hook --------
+# ---------------- Startup Hook ----------------
 async def on_startup():
     # Set bot commands
     await set_bot_commands(application)
@@ -89,18 +86,18 @@ async def on_startup():
     # Auto-set webhook
     set_webhook()
 
-# -------- Start PTB Application --------
+# ---------------- Start PTB Application ----------------
 async def start_bot():
     await application.initialize()
     await application.start()
     print("Telegram bot started (listening via webhook).")
 
-# -------- Flask Endpoints --------
+# ---------------- Flask Endpoints ----------------
 @app_flask.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
     print("Webhook called!")  # Debug log
     json_update = request.get_json(force=True)
-    print("Update received:", json_update)  # Log update payload
+    print("Update received:", json_update)  # Debug log
     update = Update.de_json(json_update, application.bot)
     application.update_queue.put_nowait(update)
     return "OK", 200
@@ -119,7 +116,7 @@ def debug_webhook():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# -------- Main Entrypoint --------
+# ---------------- Main Entrypoint ----------------
 def main():
     try:
         print("Initializing DB...")
@@ -127,12 +124,13 @@ def main():
 
         port = int(os.environ.get("PORT", 5000))
 
+        # Run both async startup tasks on single event loop
         async def startup():
             await on_startup()
             await start_bot()
 
         import asyncio
-        asyncio.run(startup())  # Run both startup tasks on same loop
+        asyncio.run(startup())
 
         print(f"Starting Flask server on port {port}...")
         app_flask.run(host="0.0.0.0", port=port)
