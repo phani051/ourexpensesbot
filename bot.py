@@ -6,9 +6,7 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
 )
-from flask import Flask, request
-import asyncio
-
+from flask import Flask, request, jsonify
 
 from db import init_db
 from config import BOT_TOKEN
@@ -62,15 +60,16 @@ register_handlers(application)
 
 # -------- Auto-set Webhook --------
 def set_webhook():
-    render_url = os.getenv("RENDER_URL", f"https://{os.getenv('RENDER_EXTERNAL_URL', '')}")
+    render_url = os.getenv("RENDER_URL", "")
     if not render_url:
-        print("⚠️ RENDER_URL not set — webhook not configured")
+        print("⚠️ RENDER_URL not set — webhook will not be configured.")
         return
 
     webhook_url = f"{render_url}/{BOT_TOKEN}"
     api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}"
 
     try:
+        print(f"Setting webhook to {webhook_url}")
         response = requests.get(api_url)
         print("Webhook set response:", response.json())
     except Exception as e:
@@ -78,14 +77,16 @@ def set_webhook():
 
 # -------- Startup Hook --------
 async def on_startup():
+    # Set bot commands
     await set_bot_commands(application)
 
+    # Start scheduler
     scheduler = AsyncIOScheduler()
     scheduler.add_job(auto_export_last_month, "cron", hour=0, minute=10, args=[application])
     scheduler.start()
     print("Scheduler started.")
 
-    # Auto-set webhook when app starts
+    # Auto-set webhook
     set_webhook()
 
 # -------- Flask Endpoints --------
@@ -100,15 +101,32 @@ def webhook():
 def index():
     return "Bot is running via webhook!", 200
 
+@app_flask.route("/debug", methods=['GET'])
+def debug_webhook():
+    """Check current webhook status from Telegram API."""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo"
+    try:
+        resp = requests.get(url).json()
+        return jsonify(resp), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # -------- Main Entrypoint --------
-
 def main():
-    init_db()
-    port = int(os.environ.get("PORT", 5000))
+    try:
+        print("Initializing DB...")
+        init_db()
 
-    # Run startup tasks manually
-    import asyncio
-    asyncio.run(on_startup())
+        port = int(os.environ.get("PORT", 5000))
 
-    # Start Flask app (Telegram sends updates here)
-    app_flask.run(host="0.0.0.0", port=port)
+        # Run startup tasks manually (async)
+        import asyncio
+        asyncio.run(on_startup())
+
+        print(f"Starting Flask server on port {port}...")
+        app_flask.run(host="0.0.0.0", port=port)
+    except Exception as e:
+        print("Fatal error on startup:", e)
+
+if __name__ == "__main__":
+    main()
