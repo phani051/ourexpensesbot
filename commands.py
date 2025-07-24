@@ -6,6 +6,7 @@ from utils import get_user_group_id, require_group
 from utils import get_current_month
 import os
 import pandas as pd
+from utils import require_admin
 
 # ===================== GROUP COMMANDS =====================
 
@@ -63,7 +64,7 @@ async def mygroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"👥 Your current group: *{name}*", parse_mode="Markdown")
 
-
+@require_admin
 async def listgroups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all available groups."""
     conn = sqlite3.connect("expenses.db")
@@ -82,7 +83,7 @@ async def listgroups(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(text, parse_mode="Markdown")
 
-
+@require_admin
 async def switchgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Switch user to another group."""
     user_id = update.effective_user.id
@@ -118,6 +119,7 @@ async def switchgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===================== USER MANAGEMENT =====================
 
+@require_admin
 async def listusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List users in current group."""
     group_id = get_user_group_id(update.effective_user.id)
@@ -141,7 +143,7 @@ async def listusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(text, parse_mode="Markdown")
 
-
+@require_admin
 async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Remove a user by username from group."""
     if not context.args:

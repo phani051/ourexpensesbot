@@ -3,8 +3,21 @@ import sqlite3
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ContextTypes
+from functools import wraps
+from dotenv import load_dotenv
+import os
 
 from config import DB_NAME
+from config import ADMIN_ID
+
+def require_admin(func):
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id != ADMIN_ID:
+            await update.message.reply_text("❌ You are not authorized to use this command.")
+            return
+        return await func(update, context)
+    return wrapper
 
 
 def get_user_group_id(user_id):
