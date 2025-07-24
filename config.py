@@ -1,4 +1,6 @@
 # config.py
-BOT_TOKEN = "7570600838:AAHFsLEK-BDTaBHaCwZyscHbOAdXTWXrT-4"
-ADMIN_ID = 7414452859  # Replace with your Telegram user ID
+from dotenv import load_dotenv
+import os
+BOT_TOKEN = os.getenv("BOT_TOKEN"
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 DB_NAME = "expenses.db"
