@@ -7,6 +7,8 @@ from telegram.ext import (
     CommandHandler,
 )
 from flask import Flask, request
+import asyncio
+
 
 from db import init_db
 from config import BOT_TOKEN
@@ -99,14 +101,14 @@ def index():
     return "Bot is running via webhook!", 200
 
 # -------- Main Entrypoint --------
+
 def main():
     init_db()
     port = int(os.environ.get("PORT", 5000))
 
-    application.post_init(on_startup)
+    # Run startup tasks manually
+    import asyncio
+    asyncio.run(on_startup())
 
     # Start Flask app (Telegram sends updates here)
     app_flask.run(host="0.0.0.0", port=port)
-
-if __name__ == "__main__":
-    main()
