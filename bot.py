@@ -127,10 +127,12 @@ def main():
 
         port = int(os.environ.get("PORT", 5000))
 
-        # Run startup tasks and start PTB bot
+        async def startup():
+            await on_startup()
+            await start_bot()
+
         import asyncio
-        asyncio.run(on_startup())
-        asyncio.run(start_bot())
+        asyncio.run(startup())  # Run both startup tasks on same loop
 
         print(f"Starting Flask server on port {port}...")
         app_flask.run(host="0.0.0.0", port=port)
