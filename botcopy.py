@@ -26,7 +26,8 @@ from commands import (
     confirm_reset,
     help_command,
     export_data,
-    summary
+    summary,
+    set_timezone
 )
 from scheduler import auto_export_last_month
 
@@ -48,6 +49,7 @@ def register_handlers(app):
     app.add_handler(CommandHandler("confirmreset", confirm_reset))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("export", export_data))
+    app.add_handler(CommandHandler("settimezone", set_timezone))
     app.add_handler(CommandHandler("summary", summary))
 
 

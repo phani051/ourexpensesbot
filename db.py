@@ -73,6 +73,7 @@ def init_db():
     add_column_if_missing("expenses", "group_id", "INTEGER DEFAULT 1")
     add_column_if_missing("income", "group_id", "INTEGER DEFAULT 1")
     add_column_if_missing("budgets", "group_id", "INTEGER DEFAULT 1")
+    add_column_if_missing("groups", "timezone", "TEXT")
 
     # Ensure budgets unique
     cursor.execute("""
@@ -96,6 +97,12 @@ def init_db():
         SET username = 'Unknown'
         WHERE username IS NULL OR username = ''
     """)
+    # Migration: add timezone column to groups
+    try:
+        cursor.execute("ALTER TABLE groups ADD COLUMN timezone TEXT DEFAULT 'Asia/Kolkata'")
+    except sqlite3.OperationalError:
+        pass
+    
 
     conn.commit()
     conn.close()

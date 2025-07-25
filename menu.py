@@ -14,10 +14,12 @@ async def set_bot_commands(app):
         BotCommand("list", "📜 List expenses"),
         BotCommand("categories", "📊 Category budgets"),
         BotCommand("setbudget", "🎯 Set budget"),
+        BotCommand("settimezone", "🛎 Set timezone for your group"),
         BotCommand("reset", "♻ Reset group data"),
         BotCommand("confirmreset", "✅ Confirm reset"),
         BotCommand("export", "📂 Export data to Excel"),
         BotCommand("summary", "📑 Monthly summary"),  # Emoji added
+        
         BotCommand("help", "ℹ️ Show help"),
     ]
     await app.bot.set_my_commands(commands)

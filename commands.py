@@ -2,11 +2,12 @@ import sqlite3
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ContextTypes
-from utils import get_user_group_id, require_group
+from utils import get_user_group_id, require_group, get_group_timezone, get_current_time_for_group
 from utils import get_current_month
 import os
 import pandas as pd
 from utils import require_admin
+import pytz
 
 # ===================== GROUP COMMANDS =====================
 
@@ -178,16 +179,18 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     category = context.args[1]
     note = " ".join(context.args[2:]) if len(context.args) > 2 else ""
 
-    user = update.effective_user.username or update.effective_user.first_name
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    username = update.effective_user.username or update.effective_user.first_name
     group_id = get_user_group_id(update.effective_user.id)
+    timestamp = get_current_time_for_group(group_id)  # Use group timezone
+    
+    
 
     conn = sqlite3.connect("expenses.db")
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO expenses (timestamp, user, amount, category, note, group_id)
         VALUES (?, ?, ?, ?, ?, ?)
-    """, (timestamp, user, amount, category, note, group_id))
+    """, (timestamp, username, amount, category, note, group_id))
 
     # Check total expenses for this category in current month
     current_month = get_current_month()
@@ -208,7 +211,7 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     # Send confirmation
-    await update.message.reply_text(f"✅ Added expense: {amount:.2f} for *{category}*", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Added expense: {amount:.2f} for *{category} — {timestamp}*", parse_mode="Markdown")
 
     # Send budget alert if applicable
     if budget_row:
@@ -222,7 +225,9 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @require_group
 async def add_income(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add income to the group."""
+    group_id = get_user_group_id(update.effective_user.id)
+    user_name = update.effective_user.username or update.effective_user.first_name
+
     if len(context.args) < 1:
         await update.message.reply_text("Usage: /income <amount> [note]")
         return
@@ -230,24 +235,23 @@ async def add_income(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amount = float(context.args[0])
     except ValueError:
-        await update.message.reply_text("❌ Invalid amount.")
+        await update.message.reply_text("Invalid amount. Example: `/income 500 salary`", parse_mode="Markdown")
         return
 
     note = " ".join(context.args[1:]) if len(context.args) > 1 else ""
-    user_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name
-    group_id = get_user_group_id(user_id)
 
     conn = sqlite3.connect("expenses.db")
+    timestamp = get_current_time_for_group(group_id)  # Use group timezone
+    username = update.effective_user.username or update.effective_user.first_name
     cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO income (timestamp, user, amount, note, group_id) VALUES (?, ?, ?, ?, ?)",
-        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username, amount, note, group_id),
-    )
+    cursor.execute("""
+        INSERT INTO income (timestamp, user, amount, note, group_id)
+        VALUES (?, ?, ?, ?, ?)
+    """, (timestamp, username, amount, note, group_id))
     conn.commit()
     conn.close()
 
-    await update.message.reply_text(f"💰 Income added: *{amount}*", parse_mode="Markdown")
+    await update.message.reply_text(f"💰 Added income *{amount}* by *{user_name} — {timestamp}*.", parse_mode="Markdown")
 
 
 # ===================== LIST COMMANDS =====================
@@ -457,54 +461,87 @@ async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Clean up
     os.remove(filename)
 
+# ===================== SUMMARY COMMAND =====================
+
 @require_group
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show monthly summary: income, expenses, balance"""
+    """Show combined and per-user monthly summary with emojis."""
     group_id = get_user_group_id(update.effective_user.id)
-    current_month = get_current_month()
+    month = get_current_month()
 
     conn = sqlite3.connect("expenses.db")
     cursor = conn.cursor()
 
-    # Total income
-    cursor.execute("""
-        SELECT SUM(amount) FROM income
-        WHERE strftime('%Y-%m', timestamp) = ? AND group_id = ?
-    """, (current_month, group_id))
-    total_income = cursor.fetchone()[0] or 0
+    # Combined totals
+    cursor.execute(
+        "SELECT IFNULL(SUM(amount),0) FROM expenses WHERE group_id=? AND strftime('%Y-%m', timestamp)=?",
+        (group_id, month),
+    )
+    total_expenses = cursor.fetchone()[0]
 
-    # Total expenses
-    cursor.execute("""
-        SELECT SUM(amount) FROM expenses
-        WHERE strftime('%Y-%m', timestamp) = ? AND group_id = ?
-    """, (current_month, group_id))
-    total_expenses = cursor.fetchone()[0] or 0
+    cursor.execute(
+        "SELECT IFNULL(SUM(amount),0) FROM income WHERE group_id=? AND strftime('%Y-%m', timestamp)=?",
+        (group_id, month),
+    )
+    total_income = cursor.fetchone()[0]
 
-    # Balance
     balance = total_income - total_expenses
 
-    # Per-category breakdown (optional)
+    # Per-user breakdown
     cursor.execute("""
-        SELECT category, SUM(amount) FROM expenses
-        WHERE strftime('%Y-%m', timestamp) = ? AND group_id = ?
-        GROUP BY category
-    """, (current_month, group_id))
-    category_data = cursor.fetchall()
+        SELECT user, 
+               IFNULL(SUM(CASE WHEN type='expense' THEN amount END), 0) AS expenses,
+               IFNULL(SUM(CASE WHEN type='income' THEN amount END), 0) AS income
+        FROM (
+            SELECT user, amount, 'expense' AS type FROM expenses WHERE group_id=? AND strftime('%Y-%m', timestamp)=?
+            UNION ALL
+            SELECT user, amount, 'income' AS type FROM income WHERE group_id=? AND strftime('%Y-%m', timestamp)=?
+        )
+        GROUP BY user
+    """, (group_id, month, group_id, month))
 
+    per_user = cursor.fetchall()
     conn.close()
 
-    # Format summary
-    text = f"📊 *Monthly Summary ({current_month})*\n\n"
-    text += f"💰 *Income:* `{total_income:.2f}`\n"
-    text += f"💸 *Expenses:* `{total_expenses:.2f}`\n"
-    text += f"🏦 *Balance:* `{balance:.2f}`\n\n"
+    # Format response
+    text = f"**📊 Group Summary for {month}**\n"
+    text += f"**Income:** 💰 {total_income:.2f}\n"
+    text += f"**Expenses:** 💸 {total_expenses:.2f}\n"
+    text += f"**Balance:** {'🟢' if balance>=0 else '🔴'} {balance:.2f}\n\n"
 
-    if category_data:
-        text += "*By Category:*\n"
-        for category, amount in category_data:
-            text += f"  • {category}: `{amount:.2f}`\n"
+    text += "**👥 Per-User Breakdown:**\n"
+    for user, expenses, income in per_user:
+        user_balance = income - expenses
+        text += (
+            f"- `{user}` → Income: 💰 {income:.2f}, "
+            f"Expenses: 💸 {expenses:.2f}, "
+            f"Balance: {'🟢' if user_balance>=0 else '🔴'} {user_balance:.2f}\n"
+        )
 
     await update.message.reply_text(text, parse_mode="Markdown")
+
+
+@require_group
+async def set_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set timezone for the current group."""
+    group_id = get_user_group_id(update.effective_user.id)
+
+    if not context.args:
+        await update.message.reply_text("Usage: /settimezone <Region/City>\nExample: `/settimezone Asia/Kolkata`", parse_mode="Markdown")
+        return
+
+    tz_input = context.args[0]
+    if tz_input not in pytz.all_timezones:
+        await update.message.reply_text("❌ Invalid timezone. Use a valid `Region/City` (e.g., `Asia/Kolkata`).", parse_mode="Markdown")
+        return
+
+    conn = sqlite3.connect("expenses.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE groups SET timezone=? WHERE id=?", (tz_input, group_id))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(f"✅ Timezone set to `{tz_input}` for this group.", parse_mode="Markdown")
 
 
 
@@ -528,6 +565,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ /confirmreset - Confirm reset after /reset\n"
         "📂 /export - Export data to Excel\n"
         "📑 /summary - Monthly summary (income, expenses, balance)\n"
+        "🌍 /settimezone - `<Timezone>` Set timezone for your group\n"
         "ℹ️ /help - Show this help message\n"
     )
     await update.message.reply_text(text, parse_mode="Markdown")

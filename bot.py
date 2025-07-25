@@ -10,7 +10,7 @@ from menu import set_bot_commands
 from commands import (
     startgroup, mygroup, listusers, remove_user, listgroups, switchgroup,
     add_expense, add_income, list_expenses, list_categories, set_budget,
-    reset_group, confirm_reset, help_command, export_data, summary
+    reset_group, confirm_reset, help_command, export_data, summary, set_timezone
 )
 from scheduler import auto_export_last_month
 
@@ -33,6 +33,7 @@ def register_handlers(app):
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("export", export_data))
     app.add_handler(CommandHandler("summary", summary))
+    app.add_handler(CommandHandler("settimezone", set_timezone))
 
 
 # -------- Set Webhook with Telegram --------

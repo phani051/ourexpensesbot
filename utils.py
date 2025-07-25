@@ -4,7 +4,8 @@ from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ContextTypes
 from functools import wraps
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
+import pytz
 import os
 
 from config import DB_NAME
@@ -28,6 +29,27 @@ def get_user_group_id(user_id):
     conn.close()
     return result[0] if result else None
 
+def get_group_timezone(group_id):
+    """
+    Fetch timezone for a group from DB. Default to Asia/Kolkata if not set.
+    """
+    conn = sqlite3.connect("expenses.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT timezone FROM groups WHERE id=?", (group_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    # Default timezone is Asia/Kolkata
+    tz_name = row[0] if row and row[0] else "Asia/Kolkata"
+    return pytz.timezone(tz_name)
+
+def get_current_time_for_group(group_id):
+    """
+    Get current timestamp in the group's timezone (default Asia/Kolkata).
+    """
+    tz = get_group_timezone(group_id)
+    return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+
 
 def require_group(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -41,8 +63,10 @@ def require_group(func):
     return wrapper
 
 
-def get_current_month():
-    return datetime.now().strftime("%Y-%m")
+def get_current_month(group_id=None):
+    """Return YYYY-MM of current time in group's timezone (default Asia/Kolkata)."""
+    tz = pytz.timezone(get_group_timezone(group_id)) if group_id else pytz.timezone("Asia/Kolkata")
+    return datetime.now(tz).strftime("%Y-%m")
 
 
 def should_send_alert(group_id, category):
