@@ -2,23 +2,24 @@ import sqlite3
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ContextTypes
+from config import DB_NAME
 from utils import get_user_group_id, require_group, get_group_timezone, get_current_time_for_group
-from utils import get_current_month
+from utils import get_current_month, generate_invite_code
 import os
 import pandas as pd
-from utils import require_admin
+from utils import require_admin, generate_invite_code
 import pytz
 
 # ===================== GROUP COMMANDS =====================
 
 async def startgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Create or join a group."""
     user_id = update.effective_user.id
     username = update.effective_user.username or update.effective_user.first_name
 
+    # Prevent duplicate membership
     existing_group_id = get_user_group_id(user_id)
     if existing_group_id:
-        await update.message.reply_text("⚠️ You are already part of a group. Leave it before joining another.")
+        await update.message.reply_text("⚠️ You already belong to a group. Leave it before creating a new one.")
         return
 
     if not context.args:
@@ -27,18 +28,26 @@ async def startgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     group_name = context.args[0]
 
-    conn = sqlite3.connect("expenses.db")
+    # Check if group already exists
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-
     cursor.execute("SELECT id FROM groups WHERE name=?", (group_name,))
     existing = cursor.fetchone()
 
     if existing:
-        group_id = existing[0]
-    else:
-        cursor.execute("INSERT INTO groups (name) VALUES (?)", (group_name,))
-        group_id = cursor.lastrowid
+        await update.message.reply_text("❌ Group name already exists. Choose a different name.")
+        conn.close()
+        return
 
+    # Create new group with invite code
+    invite_code = generate_invite_code()
+    cursor.execute(
+        "INSERT INTO groups (name, invite_code, timezone) VALUES (?, ?, 'Asia/Kolkata')",
+        (group_name, invite_code),
+    )
+    group_id = cursor.lastrowid
+
+    # Add creator to group
     cursor.execute(
         "INSERT OR REPLACE INTO users (user_id, username, group_id) VALUES (?, ?, ?)",
         (user_id, username, group_id),
@@ -47,7 +56,61 @@ async def startgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await update.message.reply_text(f"🎉 You have joined group: *{group_name}*", parse_mode="Markdown")
+    await update.message.reply_text(
+        f"🎉 Group *{group_name}* created!\n"
+        f"Share this invite code to let others join: `{invite_code}`",
+        parse_mode="Markdown"
+    )
+
+
+
+#@require_group  # Must not already be in group
+async def joingroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
+
+    # Check if already in a group
+    existing_group_id = get_user_group_id(user_id)
+    if existing_group_id:
+        await update.message.reply_text("⚠️ You already belong to a group. Leave it before joining another.")
+        return
+
+    # Validate input
+    if not context.args:
+        await update.message.reply_text("Usage: /joingroup <invite_code>")
+        return
+
+    invite_code = context.args[0]
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    # Check invite code
+    cursor.execute("SELECT id, name FROM groups WHERE invite_code=?", (invite_code,))
+    group = cursor.fetchone()
+
+    if not group:
+        await update.message.reply_text("❌ Invalid invite code. Please check with group admin.")
+        conn.close()
+        return
+
+    group_id, group_name = group
+
+    # Add user to group
+    cursor.execute(
+        "INSERT OR REPLACE INTO users (user_id, username, group_id) VALUES (?, ?, ?)",
+        (user_id, username, group_id),
+    )
+
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(
+        f"✅ You have joined *{group_name}*!",
+        parse_mode="Markdown"
+    )
+
+
 
 
 async def mygroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -65,24 +128,27 @@ async def mygroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"👥 Your current group: *{name}*", parse_mode="Markdown")
 
-@require_admin
+@require_admin  # 👑 Only admin can run this
 async def listgroups(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List all available groups."""
+    """📋 Show all groups with invite codes (admin only)."""
     conn = sqlite3.connect("expenses.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT name FROM groups")
+
+    cursor.execute("SELECT name, invite_code FROM groups")
     groups = cursor.fetchall()
     conn.close()
 
     if not groups:
-        await update.message.reply_text("📭 No groups available.")
+        await update.message.reply_text("⚠️ No groups found.")
         return
 
-    text = "📋 *Available Groups:*\n\n"
-    for g in groups:
-        text += f"- {g[0]}\n"
+    # Show name + invite code
+    text = "📋 *All Groups (Admin View)*\n\n"
+    for name, code in groups:
+        text += f"• *{name}* — 🔑 Invite Code: `{code}`\n"
 
     await update.message.reply_text(text, parse_mode="Markdown")
+
 
 @require_admin
 async def switchgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -550,7 +616,8 @@ async def set_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🤖 *Available Commands:*\n\n"
-        "🏠 /startgroup `<name>` - Create or join a group\n"
+        "🏠 /startgroup `<name>` – Create new Familygroup\n"
+        "🔑 /joingroup <code> - Join group using invite code\n"
         "👥 /mygroup - Show your current group\n"
         "📋 /listgroups – List all groups\n"
         "📋 /listusers - List users in your group\n"

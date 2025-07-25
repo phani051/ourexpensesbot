@@ -1,13 +1,42 @@
-# db.py
 import sqlite3
-
+import secrets
 from config import DB_NAME
+
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # Create tables
+    # ===================== GROUPS =====================
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS groups (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE,
+        invite_code TEXT UNIQUE,
+        timezone TEXT DEFAULT 'Asia/Kolkata'
+    )
+    """)
+
+    # Ensure columns exist (migration for older DBs)
+    def add_column_if_missing(table, column, definition):
+        cursor.execute(f"PRAGMA table_info({table})")
+        columns = [row[1] for row in cursor.fetchall()]
+        if column not in columns:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition};")
+
+    add_column_if_missing("groups", "invite_code", "TEXT UNIQUE")
+    add_column_if_missing("groups", "timezone", "TEXT DEFAULT 'Asia/Kolkata'")
+
+    # ===================== USERS =====================
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        group_id INTEGER
+    )
+    """)
+
+    # ===================== EXPENSES =====================
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS expenses (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -20,6 +49,10 @@ def init_db():
     )
     """)
 
+    # Ensure group_id exists
+    add_column_if_missing("expenses", "group_id", "INTEGER")
+
+    # ===================== INCOME =====================
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS income (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -31,29 +64,20 @@ def init_db():
     )
     """)
 
+    # Ensure group_id exists
+    add_column_if_missing("income", "group_id", "INTEGER")
+
+    # ===================== BUDGETS =====================
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS budgets (
         category TEXT,
         limit_amount REAL,
-        group_id INTEGER
+        group_id INTEGER,
+        UNIQUE(category, group_id)
     )
     """)
 
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS groups (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE
-    )
-    """)
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        group_id INTEGER
-    )
-    """)
-
+    # ===================== ALERTS =====================
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS alerts (
         group_id INTEGER,
@@ -63,46 +87,21 @@ def init_db():
     )
     """)
 
-    # Migration helper
-    def add_column_if_missing(table, column, definition):
-        try:
-            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition};")
-        except sqlite3.OperationalError:
-            pass
+    # ===================== FIXES & MIGRATIONS =====================
 
-    add_column_if_missing("expenses", "group_id", "INTEGER DEFAULT 1")
-    add_column_if_missing("income", "group_id", "INTEGER DEFAULT 1")
-    add_column_if_missing("budgets", "group_id", "INTEGER DEFAULT 1")
-    add_column_if_missing("groups", "timezone", "TEXT")
-
-    # Ensure budgets unique
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS budgets_new (
-            category TEXT,
-            limit_amount REAL,
-            group_id INTEGER,
-            UNIQUE(category, group_id)
-        )
-    """)
-    cursor.execute("""
-        INSERT OR IGNORE INTO budgets_new (category, limit_amount, group_id)
-        SELECT category, limit_amount, group_id FROM budgets
-    """)
-    cursor.execute("DROP TABLE budgets")
-    cursor.execute("ALTER TABLE budgets_new RENAME TO budgets")
-
-    # Fix null usernames
+    # Fix usernames
     cursor.execute("""
         UPDATE users
         SET username = 'Unknown'
         WHERE username IS NULL OR username = ''
     """)
-    # Migration: add timezone column to groups
-    try:
-        cursor.execute("ALTER TABLE groups ADD COLUMN timezone TEXT DEFAULT 'Asia/Kolkata'")
-    except sqlite3.OperationalError:
-        pass
-    
+
+    # Generate invite codes for groups missing one
+    cursor.execute("SELECT id FROM groups WHERE invite_code IS NULL OR invite_code=''")
+    groups_without_code = cursor.fetchall()
+    for (group_id,) in groups_without_code:
+        code = secrets.token_hex(4)  # 8-char code
+        cursor.execute("UPDATE groups SET invite_code=? WHERE id=?", (code, group_id))
 
     conn.commit()
     conn.close()

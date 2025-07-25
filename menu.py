@@ -3,7 +3,8 @@ from telegram import BotCommand
 
 async def set_bot_commands(app):
     commands = [
-        BotCommand("startgroup", "🏠 Create or join a group"),
+        BotCommand("startgroup", "🏠 Create a new FamilyGroup"),
+        BotCommand("joingroup", "🔑 Join group using invite code"),
         BotCommand("mygroup", "👥 Show your current group"),
         BotCommand("listusers", "📋 List users in your group"),
         BotCommand("removeuser", "❌ Remove a user from group"),

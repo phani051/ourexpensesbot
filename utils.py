@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ContextTypes
 from functools import wraps
+import random, string
 #from dotenv import load_dotenv
 import pytz
 import os
@@ -19,6 +20,9 @@ def require_admin(func):
             return
         return await func(update, context)
     return wrapper
+
+def generate_invite_code(length=6):
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
 
 def get_user_group_id(user_id):

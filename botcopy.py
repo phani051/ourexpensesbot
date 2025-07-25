@@ -27,7 +27,7 @@ from commands import (
     help_command,
     export_data,
     summary,
-    set_timezone
+    set_timezone, joingroup
 )
 from scheduler import auto_export_last_month
 
@@ -35,6 +35,7 @@ from scheduler import auto_export_last_month
 # Register command handlers
 def register_handlers(app):
     app.add_handler(CommandHandler("startgroup", startgroup))
+    app.add_handler(CommandHandler("joingroup", joingroup))
     app.add_handler(CommandHandler("mygroup", mygroup))
     app.add_handler(CommandHandler("listusers", listusers))
     app.add_handler(CommandHandler("removeuser", remove_user))
